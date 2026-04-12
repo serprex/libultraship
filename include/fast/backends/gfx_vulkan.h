@@ -212,13 +212,6 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI {
     VkDebugUtilsMessengerEXT mDebugMessenger = VK_NULL_HANDLE;
 #endif
 
-    // Extension function pointers (loaded in CreateDevice)
-    PFN_vkCmdBeginRenderingKHR         pfnCmdBeginRenderingKHR         = nullptr;
-    PFN_vkCmdEndRenderingKHR           pfnCmdEndRenderingKHR           = nullptr;
-    PFN_vkCmdSetDepthTestEnableEXT     pfnCmdSetDepthTestEnableEXT     = nullptr;
-    PFN_vkCmdSetDepthWriteEnableEXT    pfnCmdSetDepthWriteEnableEXT    = nullptr;
-    PFN_vkCmdSetDepthCompareOpEXT      pfnCmdSetDepthCompareOpEXT      = nullptr;
-
     // Helper methods
     void CreateInstance();
     void CreateSurface();

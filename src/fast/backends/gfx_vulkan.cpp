@@ -487,7 +487,7 @@ void GfxRenderingAPIVulkan::CreateInstance() {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "Fast3D";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_2;
+    appInfo.apiVersion = VK_API_VERSION_1_3;
 
     VkInstanceCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -564,28 +564,22 @@ void GfxRenderingAPIVulkan::CreateDevice() {
     addQ(mGraphicsQueueFamily);
     addQ(mPresentQueueFamily);
 
-    // Required extensions
+    // Swapchain is still an extension in Vulkan 1.3; dynamic rendering and
+    // extended dynamic state are now core, so no KHR/EXT extensions needed.
     const char* devExts[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-        VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
     };
 
-    // Enable features
-    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynRend{};
-    dynRend.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
-    dynRend.dynamicRendering = VK_TRUE;
-
-    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extDynState{};
-    extDynState.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
-    extDynState.extendedDynamicState = VK_TRUE;
-    extDynState.pNext = &dynRend;
+    // Vulkan 1.3 unified feature struct covers dynamic rendering, sync2, etc.
+    VkPhysicalDeviceVulkan13Features vk13{};
+    vk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    vk13.dynamicRendering = VK_TRUE;
+    vk13.synchronization2 = VK_TRUE;
 
     VkPhysicalDeviceFeatures2 feat2{};
     feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     feat2.features.depthClamp = VK_TRUE;
-    feat2.features.fillModeNonSolid = VK_FALSE;
-    feat2.pNext = &extDynState;
+    feat2.pNext = &vk13;
 
     VkDeviceCreateInfo dci{};
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -598,17 +592,6 @@ void GfxRenderingAPIVulkan::CreateDevice() {
     VK_CHECK(vkCreateDevice(mPhysDevice, &dci, nullptr, &mDevice));
     vkGetDeviceQueue(mDevice, mGraphicsQueueFamily, 0, &mGraphicsQueue);
     vkGetDeviceQueue(mDevice, mPresentQueueFamily, 0, &mPresentQueue);
-
-    // Load extension function pointers
-#define LOAD_DEV_FN(name) \
-    pfn##name = (PFN_vk##name)vkGetDeviceProcAddr(mDevice, "vk" #name); \
-    if (!pfn##name) SPDLOG_WARN("vk" #name " not found")
-    LOAD_DEV_FN(CmdBeginRenderingKHR);
-    LOAD_DEV_FN(CmdEndRenderingKHR);
-    LOAD_DEV_FN(CmdSetDepthTestEnableEXT);
-    LOAD_DEV_FN(CmdSetDepthWriteEnableEXT);
-    LOAD_DEV_FN(CmdSetDepthCompareOpEXT);
-#undef LOAD_DEV_FN
 }
 
 void GfxRenderingAPIVulkan::CreateAllocator() {
@@ -616,7 +599,7 @@ void GfxRenderingAPIVulkan::CreateAllocator() {
     ai.physicalDevice = mPhysDevice;
     ai.device = mDevice;
     ai.instance = mInstance;
-    ai.vulkanApiVersion = VK_API_VERSION_1_2;
+    ai.vulkanApiVersion = VK_API_VERSION_1_3;
     VK_CHECK(vmaCreateAllocator(&ai, &mAllocator));
 }
 
@@ -1019,18 +1002,18 @@ void GfxRenderingAPIVulkan::StartDrawToFramebuffer(int fbId, float noiseScale) {
     auto& fr = mFrames[mCurrentFrame];
     VkCommandBuffer cmd = fr.cmdBuf;
 
-    VkRenderingAttachmentInfoKHR colorAttach{};
-    colorAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+    VkRenderingAttachmentInfo colorAttach{};
+    colorAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     colorAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     colorAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
-    VkRenderingAttachmentInfoKHR depthAttach{};
-    depthAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+    VkRenderingAttachmentInfo depthAttach{};
+    depthAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     depthAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
-    VkRenderingInfoKHR ri{};
-    ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+    VkRenderingInfo ri{};
+    ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &colorAttach;
 
@@ -1039,7 +1022,7 @@ void GfxRenderingAPIVulkan::StartDrawToFramebuffer(int fbId, float noiseScale) {
         colorAttach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         ri.renderArea = { {0,0}, mSwapchainExtent };
         ri.layerCount = 1;
-        pfnCmdBeginRenderingKHR(cmd, &ri);
+        vkCmdBeginRendering(cmd, &ri);
     } else {
         auto& fb = mFrameBuffers[fbId];
         colorAttach.imageView = fb.colorView;
@@ -1051,7 +1034,7 @@ void GfxRenderingAPIVulkan::StartDrawToFramebuffer(int fbId, float noiseScale) {
             depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             ri.pDepthAttachment = &depthAttach;
         }
-        pfnCmdBeginRenderingKHR(cmd, &ri);
+        vkCmdBeginRendering(cmd, &ri);
     }
 }
 
@@ -1090,7 +1073,7 @@ void GfxRenderingAPIVulkan::CopyFramebuffer(int fbDstId, int fbSrcId, int sx0, i
     // End any active rendering before blit
     auto& fr = mFrames[mCurrentFrame];
     VkCommandBuffer cmd = fr.cmdBuf;
-    pfnCmdEndRenderingKHR(cmd);
+    vkCmdEndRendering(cmd);
 
     if (fbSrcId >= (int)mFrameBuffers.size() || fbDstId >= (int)mFrameBuffers.size()) return;
 
@@ -1160,7 +1143,7 @@ void GfxRenderingAPIVulkan::ResolveMSAAColorBuffer(int fbIdTarget, int fbIdSrc) 
 
     auto& fr = mFrames[mCurrentFrame];
     VkCommandBuffer cmd = fr.cmdBuf;
-    pfnCmdEndRenderingKHR(cmd);
+    vkCmdEndRendering(cmd);
 
     auto& src = mFrameBuffers[fbIdSrc];
     auto& dst = mFrameBuffers[fbIdTarget];
@@ -1494,9 +1477,9 @@ ShaderProgramVulkan* GfxRenderingAPIVulkan::BuildShaderProgram(uint64_t shaderId
     std::vector<VkDynamicState> dynStates = {
         VK_DYNAMIC_STATE_VIEWPORT,
         VK_DYNAMIC_STATE_SCISSOR,
-        VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE_EXT,
-        VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE_EXT,
-        VK_DYNAMIC_STATE_DEPTH_COMPARE_OP_EXT,
+        VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
         VK_DYNAMIC_STATE_DEPTH_BIAS,
     };
     VkPipelineDynamicStateCreateInfo dynci{};
@@ -1505,8 +1488,8 @@ ShaderProgramVulkan* GfxRenderingAPIVulkan::BuildShaderProgram(uint64_t shaderId
     dynci.pDynamicStates = dynStates.data();
 
     // Dynamic rendering info
-    VkPipelineRenderingCreateInfoKHR prc{};
-    prc.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+    VkPipelineRenderingCreateInfo prc{};
+    prc.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     prc.colorAttachmentCount = 1;
     prc.pColorAttachmentFormats = &colorFmt;
     prc.depthAttachmentFormat = depthFmt;
@@ -1637,9 +1620,9 @@ void GfxRenderingAPIVulkan::DrawTriangles(float bufVbo[], size_t bufVboLen, size
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 
     // Set dynamic depth state
-    pfnCmdSetDepthTestEnableEXT(cmd, mDepthTestEnabled || mDepthWriteEnabled ? VK_TRUE : VK_FALSE);
-    pfnCmdSetDepthWriteEnableEXT(cmd, mDepthWriteEnabled ? VK_TRUE : VK_FALSE);
-    pfnCmdSetDepthCompareOpEXT(cmd, mDepthTestEnabled
+    vkCmdSetDepthTestEnable(cmd, mDepthTestEnabled || mDepthWriteEnabled ? VK_TRUE : VK_FALSE);
+    vkCmdSetDepthWriteEnable(cmd, mDepthWriteEnabled ? VK_TRUE : VK_FALSE);
+    vkCmdSetDepthCompareOp(cmd, mDepthTestEnabled
         ? (mZmodeDecal ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS)
         : VK_COMPARE_OP_ALWAYS);
 
@@ -1832,7 +1815,7 @@ void GfxRenderingAPIVulkan::VulkanGuiInit() {
     ii.ImageCount = (uint32_t)mSwapchainImages.size();
     ii.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     ii.UseDynamicRendering = true;
-    ii.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+    ii.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     ii.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
     ii.PipelineRenderingCreateInfo.pColorAttachmentFormats = &mSwapchainFormat;
     ImGui_ImplVulkan_Init(&ii);
