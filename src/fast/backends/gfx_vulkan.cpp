@@ -598,6 +598,17 @@ void GfxRenderingAPIVulkan::CreateDevice() {
     VK_CHECK(vkCreateDevice(mPhysDevice, &dci, nullptr, &mDevice));
     vkGetDeviceQueue(mDevice, mGraphicsQueueFamily, 0, &mGraphicsQueue);
     vkGetDeviceQueue(mDevice, mPresentQueueFamily, 0, &mPresentQueue);
+
+    // Load extension function pointers
+#define LOAD_DEV_FN(name) \
+    pfn##name = (PFN_vk##name)vkGetDeviceProcAddr(mDevice, "vk" #name); \
+    if (!pfn##name) SPDLOG_WARN("vk" #name " not found")
+    LOAD_DEV_FN(CmdBeginRenderingKHR);
+    LOAD_DEV_FN(CmdEndRenderingKHR);
+    LOAD_DEV_FN(CmdSetDepthTestEnableEXT);
+    LOAD_DEV_FN(CmdSetDepthWriteEnableEXT);
+    LOAD_DEV_FN(CmdSetDepthCompareOpEXT);
+#undef LOAD_DEV_FN
 }
 
 void GfxRenderingAPIVulkan::CreateAllocator() {
@@ -1028,7 +1039,7 @@ void GfxRenderingAPIVulkan::StartDrawToFramebuffer(int fbId, float noiseScale) {
         colorAttach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         ri.renderArea = { {0,0}, mSwapchainExtent };
         ri.layerCount = 1;
-        vkCmdBeginRenderingKHR(cmd, &ri);
+        pfnCmdBeginRenderingKHR(cmd, &ri);
     } else {
         auto& fb = mFrameBuffers[fbId];
         colorAttach.imageView = fb.colorView;
@@ -1040,7 +1051,7 @@ void GfxRenderingAPIVulkan::StartDrawToFramebuffer(int fbId, float noiseScale) {
             depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             ri.pDepthAttachment = &depthAttach;
         }
-        vkCmdBeginRenderingKHR(cmd, &ri);
+        pfnCmdBeginRenderingKHR(cmd, &ri);
     }
 }
 
@@ -1079,7 +1090,7 @@ void GfxRenderingAPIVulkan::CopyFramebuffer(int fbDstId, int fbSrcId, int sx0, i
     // End any active rendering before blit
     auto& fr = mFrames[mCurrentFrame];
     VkCommandBuffer cmd = fr.cmdBuf;
-    vkCmdEndRenderingKHR(cmd);
+    pfnCmdEndRenderingKHR(cmd);
 
     if (fbSrcId >= (int)mFrameBuffers.size() || fbDstId >= (int)mFrameBuffers.size()) return;
 
@@ -1149,7 +1160,7 @@ void GfxRenderingAPIVulkan::ResolveMSAAColorBuffer(int fbIdTarget, int fbIdSrc) 
 
     auto& fr = mFrames[mCurrentFrame];
     VkCommandBuffer cmd = fr.cmdBuf;
-    vkCmdEndRenderingKHR(cmd);
+    pfnCmdEndRenderingKHR(cmd);
 
     auto& src = mFrameBuffers[fbIdSrc];
     auto& dst = mFrameBuffers[fbIdTarget];
@@ -1626,9 +1637,9 @@ void GfxRenderingAPIVulkan::DrawTriangles(float bufVbo[], size_t bufVboLen, size
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 
     // Set dynamic depth state
-    vkCmdSetDepthTestEnableEXT(cmd, mDepthTestEnabled || mDepthWriteEnabled ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthWriteEnableEXT(cmd, mDepthWriteEnabled ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthCompareOpEXT(cmd, mDepthTestEnabled
+    pfnCmdSetDepthTestEnableEXT(cmd, mDepthTestEnabled || mDepthWriteEnabled ? VK_TRUE : VK_FALSE);
+    pfnCmdSetDepthWriteEnableEXT(cmd, mDepthWriteEnabled ? VK_TRUE : VK_FALSE);
+    pfnCmdSetDepthCompareOpEXT(cmd, mDepthTestEnabled
         ? (mZmodeDecal ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS)
         : VK_COMPARE_OP_ALWAYS);
 
