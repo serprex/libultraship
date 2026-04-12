@@ -471,6 +471,10 @@ void GfxRenderingAPIVulkan::Init() {
 
     // Reserve texture slot 0 so IDs start at 1 (mirrors OpenGL glGenTextures behaviour)
     mTextures.resize(1);
+
+    // ImGui Vulkan backend init must happen after the instance and device are created.
+    // Gui::ImGuiBackendInit() is called earlier (before mRapi->Init()), so we do it here.
+    VulkanGuiInit();
 }
 
 void GfxRenderingAPIVulkan::CreateInstance() {
@@ -478,8 +482,7 @@ void GfxRenderingAPIVulkan::CreateInstance() {
     SDL_Vulkan_GetInstanceExtensions(mSdlBackend->GetSDLWindow(), &extCount, nullptr);
     std::vector<const char*> extensions(extCount);
     SDL_Vulkan_GetInstanceExtensions(mSdlBackend->GetSDLWindow(), &extCount, extensions.data());
-
-    extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    // VK_KHR_get_physical_device_properties2 is core since Vulkan 1.1; no need to request it.
 
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -496,12 +499,26 @@ void GfxRenderingAPIVulkan::CreateInstance() {
     ci.ppEnabledExtensionNames = extensions.data();
 
 #ifdef _DEBUG
-    const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
-    ci.enabledLayerCount = 1;
-    ci.ppEnabledLayerNames = layers;
-    extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    ci.enabledExtensionCount = (uint32_t)extensions.size();
-    ci.ppEnabledExtensionNames = extensions.data();
+    // Only request validation if the layer is actually installed
+    static const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
+    uint32_t layerCount = 0;
+    vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+    std::vector<VkLayerProperties> availLayers(layerCount);
+    vkEnumerateInstanceLayerProperties(&layerCount, availLayers.data());
+    bool validationAvailable = false;
+    for (auto& l : availLayers)
+        if (strcmp(l.layerName, kValidationLayer) == 0) { validationAvailable = true; break; }
+
+    if (validationAvailable) {
+        ci.enabledLayerCount = 1;
+        ci.ppEnabledLayerNames = &kValidationLayer;
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        ci.enabledExtensionCount = (uint32_t)extensions.size();
+        ci.ppEnabledExtensionNames = extensions.data();
+        SPDLOG_INFO("Vulkan validation layer enabled");
+    } else {
+        SPDLOG_WARN("VK_LAYER_KHRONOS_validation not found, validation disabled");
+    }
 #endif
 
     VK_CHECK(vkCreateInstance(&ci, nullptr, &mInstance));

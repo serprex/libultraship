@@ -259,12 +259,11 @@ void Gui::ImGuiBackendInit() {
 #endif
 
 #ifdef ENABLE_VULKAN
-        case WindowBackend::FAST3D_SDL_VULKAN: {
-            Fast::GfxRenderingAPIVulkan* api =
-                (Fast::GfxRenderingAPIVulkan*)mInterpreter.lock()->GetCurrentRenderingAPI();
-            api->VulkanGuiInit();
+        case WindowBackend::FAST3D_SDL_VULKAN:
+            // VulkanGuiInit() is called from GfxRenderingAPIVulkan::Init() after the
+            // Vulkan instance and device are created. At this point (called from
+            // gfx_sdl2.cpp before mRapi->Init()) mInstance is still VK_NULL_HANDLE.
             break;
-        }
 #endif
         default:
             break;
