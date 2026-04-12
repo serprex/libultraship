@@ -37,6 +37,7 @@ endif()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(FILTER Source_Files__Graphic EXCLUDE REGEX "graphic/Fast3D/backends/gfx_opengl*")
+    list(FILTER Source_Files__Graphic EXCLUDE REGEX ".*gfx_vulkan.*")
 endif()
 
 source_group("graphic" FILES ${Source_Files__Graphic})

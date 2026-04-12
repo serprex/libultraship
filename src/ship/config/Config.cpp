@@ -320,6 +320,9 @@ WindowBackend Config::GetWindowBackend() {
         return WindowBackend::FAST3D_SDL_METAL;
     }
 #endif
+#ifdef ENABLE_VULKAN
+    return WindowBackend::FAST3D_SDL_VULKAN;
+#endif
     return WindowBackend::FAST3D_SDL_OPENGL;
 }
 
@@ -335,6 +338,9 @@ void Config::SetWindowBackend(WindowBackend backend) {
             break;
         case WindowBackend::FAST3D_SDL_METAL:
             SetString("Window.Backend.Name", "Metal");
+            break;
+        case WindowBackend::FAST3D_SDL_VULKAN:
+            SetString("Window.Backend.Name", "Vulkan");
             break;
         default:
             SetString("Window.Backend.Name", "");

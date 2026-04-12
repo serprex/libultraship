@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-#if defined(ENABLE_OPENGL) || defined(__APPLE__)
+#if defined(ENABLE_OPENGL) || defined(__APPLE__) || defined(ENABLE_VULKAN)
 
 #ifdef __MINGW32__
 #define FOR_WINDOWS 1
@@ -30,8 +30,13 @@
 #include "ship/utils/macUtils.h"
 #else
 #include <SDL2/SDL.h>
+#ifdef ENABLE_VULKAN
+#include <SDL2/SDL_vulkan.h>
+#endif
+#if defined(ENABLE_OPENGL)
 #define GL_GLEXT_PROTOTYPES 1
 #include <SDL2/SDL_opengles2.h>
+#endif
 #endif
 
 #include "ship/window/gui/Gui.h"
@@ -328,13 +333,21 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
 
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
-#if defined(__APPLE__)
-    bool use_opengl = strcmp(gfxApiName, "OpenGL") == 0;
+#if defined(ENABLE_VULKAN)
+    bool use_vulkan = strcmp(gfxApiName, "Vulkan") == 0;
 #else
-    constexpr bool use_opengl = true;
+    constexpr bool use_vulkan = false;
 #endif
 
-    if (use_opengl) {
+#if defined(__APPLE__)
+    bool use_opengl = !use_vulkan && strcmp(gfxApiName, "OpenGL") == 0;
+#else
+    bool use_opengl = !use_vulkan;
+#endif
+
+    if (use_vulkan) {
+        mVulkanMode = true;
+    } else if (use_opengl) {
         SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
         SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
@@ -376,7 +389,9 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
     Uint32 flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 #endif
 
-    if (use_opengl) {
+    if (use_vulkan) {
+        flags = flags | SDL_WINDOW_VULKAN;
+    } else if (use_opengl) {
         flags = flags | SDL_WINDOW_OPENGL;
     } else {
         flags = flags | SDL_WINDOW_METAL;
@@ -401,7 +416,15 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
         posY = 100;
     }
 
-    if (use_opengl) {
+    if (use_vulkan) {
+        SDL_Vulkan_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
+
+        if (startFullScreen) {
+            SetFullscreenImpl(true, false);
+        }
+
+        window_impl.Vulkan = { mWnd };
+    } else if (use_opengl) {
         SDL_GL_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
 
         if (startFullScreen) {
@@ -522,7 +545,11 @@ void GfxWindowBackendSDL2::GetDimensions(uint32_t* width, uint32_t* height, int3
 #ifdef __APPLE__
     SDL_GetWindowSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
 #else
-    SDL_GL_GetDrawableSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
+    if (mVulkanMode) {
+        SDL_Vulkan_GetDrawableSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
+    } else {
+        SDL_GL_GetDrawableSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
+    }
 #endif
     SDL_GetWindowPosition(mWnd, static_cast<int*>(posX), static_cast<int*>(posY));
 }
@@ -603,7 +630,11 @@ void GfxWindowBackendSDL2::HandleSingleEvent(SDL_Event& event) {
 #ifdef __APPLE__
                     SDL_GetWindowSize(mWnd, &mWindowWidth, &mWindowHeight);
 #else
-                    SDL_GL_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
+                    if (mVulkanMode) {
+                        SDL_Vulkan_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
+                    } else {
+                        SDL_GL_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
+                    }
 #endif
                     break;
                 case SDL_WINDOWEVENT_CLOSE:
@@ -699,6 +730,11 @@ void GfxWindowBackendSDL2::SyncFramerateWithTime() const {
 }
 
 void GfxWindowBackendSDL2::SwapBuffersBegin() {
+    if (mVulkanMode) {
+        SyncFramerateWithTime();
+        return; // Vulkan presents via its own queue submission
+    }
+
     bool nextVsyncEnabled = Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger(CVAR_VSYNC_ENABLED, 1);
 
     if (mVsyncEnabled != nextVsyncEnabled) {
@@ -744,10 +780,22 @@ bool GfxWindowBackendSDL2::IsRunning() {
 
 void GfxWindowBackendSDL2::Destroy() {
     // TODO: destroy _any_ resources used by SDL
-    SDL_GL_DeleteContext(mCtx);
+    if (!mVulkanMode) {
+        SDL_GL_DeleteContext(mCtx);
+    }
     SDL_DestroyWindow(mWnd);
-    SDL_DestroyRenderer(mRenderer);
+    if (mRenderer != nullptr) {
+        SDL_DestroyRenderer(mRenderer);
+    }
     SDL_Quit();
+}
+
+SDL_Window* GfxWindowBackendSDL2::GetSDLWindow() const {
+    return mWnd;
+}
+
+bool GfxWindowBackendSDL2::IsVulkanMode() const {
+    return mVulkanMode;
 }
 
 bool GfxWindowBackendSDL2::IsFullscreen() {

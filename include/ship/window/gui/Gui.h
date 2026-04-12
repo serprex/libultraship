@@ -47,6 +47,9 @@ typedef struct {
             uint32_t Width;
             uint32_t Height;
         } Gx2;
+        struct {
+            void* Window; // SDL_Window*
+        } Vulkan;
     };
 } GuiWindowInitData;
 

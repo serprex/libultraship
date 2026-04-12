@@ -1,6 +1,8 @@
 #pragma once
 
 #include "gfx_window_manager_api.h"
+#include <SDL2/SDL.h>
+
 namespace Fast {
 class GfxWindowBackendSDL2 final : public GfxWindowBackend {
   public:
@@ -38,6 +40,8 @@ class GfxWindowBackendSDL2 final : public GfxWindowBackend {
     bool IsRunning() override;
     void Destroy() override;
     bool IsFullscreen() override;
+    SDL_Window* GetSDLWindow() const;
+    bool IsVulkanMode() const;
 
   private:
     void SetFullscreenImpl(bool on, bool call_callback);
@@ -57,6 +61,7 @@ class GfxWindowBackendSDL2 final : public GfxWindowBackend {
     int mSdlToLusTable[512];
     float mMouseWheelX = 0.0f;
     float mMouseWheelY = 0.0f;
+    bool mVulkanMode = false;
 #ifdef __OpenBSD__
     int mBsdTick; // store kern.clockrate's tick (microseconds) to adjust sleep timing
 #endif

@@ -109,6 +109,35 @@ endif()
 
 target_link_libraries(libultraship PUBLIC prism)
 
+#=================== Vulkan ===================
+
+option(ENABLE_VULKAN "Enable Vulkan rendering backend" ON)
+if (ENABLE_VULKAN AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
+    find_package(Vulkan REQUIRED)
+    target_link_libraries(libultraship PRIVATE Vulkan::Vulkan)
+
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SHADERC shaderc)
+    if (SHADERC_FOUND)
+        target_link_libraries(libultraship PRIVATE ${SHADERC_LIBRARIES})
+        target_include_directories(libultraship PRIVATE ${SHADERC_INCLUDE_DIRS})
+        target_link_directories(libultraship PRIVATE ${SHADERC_LIBRARY_DIRS})
+    else()
+        find_library(SHADERC_LIB NAMES shaderc_shared shaderc_combined shaderc REQUIRED)
+        target_link_libraries(libultraship PRIVATE ${SHADERC_LIB})
+    endif()
+
+    if (DEFINED vma_SOURCE_DIR)
+        target_include_directories(libultraship PRIVATE ${vma_SOURCE_DIR}/include)
+    elseif (EXISTS /usr/include/vk_mem_alloc.h)
+        # System-installed VMA
+    else()
+        message(WARNING "VulkanMemoryAllocator (VMA) not found. Vulkan backend may fail to compile.")
+    endif()
+
+    target_include_directories(libultraship PRIVATE ${Vulkan_INCLUDE_DIRS})
+endif()
+
 #=================== Compile Options & Defs ===================
 
 target_compile_definitions(libultraship PRIVATE ${GBI_UCODE})
@@ -179,6 +208,7 @@ else()
         SPDLOG_ACTIVE_LEVEL=${SPDLOG_MIN_CUTOFF}
         $<$<BOOL:${USE_OPENGLES}>:USE_OPENGLES>
         $<$<BOOL:${GFX_DEBUG_DISASSEMBLER}>:GFX_DEBUG_DISASSEMBLER>
+        $<$<BOOL:${ENABLE_VULKAN}>:ENABLE_VULKAN>
     )
 endif()
 
