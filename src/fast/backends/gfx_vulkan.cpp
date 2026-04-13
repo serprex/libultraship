@@ -432,7 +432,6 @@ GfxRenderingAPIVulkan::~GfxRenderingAPIVulkan() {
     for (auto& fr : mFrames) {
         vkDestroyCommandPool(mDevice, fr.cmdPool, nullptr);
         vkDestroySemaphore(mDevice, fr.imageAvailableSem, nullptr);
-        vkDestroySemaphore(mDevice, fr.renderFinishedSem, nullptr);
         vkDestroyFence(mDevice, fr.inFlightFence, nullptr);
     }
 
@@ -650,7 +649,6 @@ void GfxRenderingAPIVulkan::CreateSyncObjects() {
 
     for (auto& fr : mFrames) {
         VK_CHECK(vkCreateSemaphore(mDevice, &si, nullptr, &fr.imageAvailableSem));
-        VK_CHECK(vkCreateSemaphore(mDevice, &si, nullptr, &fr.renderFinishedSem));
         VK_CHECK(vkCreateFence(mDevice, &fi, nullptr, &fr.inFlightFence));
     }
 }
@@ -689,14 +687,14 @@ void GfxRenderingAPIVulkan::CreateDescriptorPool() {
     ci.pPoolSizes = poolSizes;
     VK_CHECK(vkCreateDescriptorPool(mDevice, &ci, nullptr, &mDescriptorPool));
 
-    // Per-frame descriptor pools (reset each frame)
+    // Per-frame descriptor pools (reset each frame via vkResetDescriptorPool)
     VkDescriptorPoolSize fpSizes[] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192 },
     };
     for (int i = 0; i < VULKAN_FRAMES_IN_FLIGHT; i++) {
         VkDescriptorPoolCreateInfo fci{};
         fci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        fci.maxSets = 512;
+        fci.maxSets = 4096;
         fci.poolSizeCount = (uint32_t)std::size(fpSizes);
         fci.pPoolSizes = fpSizes;
         VK_CHECK(vkCreateDescriptorPool(mDevice, &fci, nullptr, &mFrameDescPool[i]));
@@ -791,9 +789,21 @@ void GfxRenderingAPIVulkan::CreateSwapchain() {
         ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
         VK_CHECK(vkCreateImageView(mDevice, &ivci, nullptr, &mSwapchainImageViews[i]));
     }
+
+    // One renderFinished semaphore per swapchain image.  Presentation holds
+    // the semaphore until the image is on screen; using one per image prevents
+    // us from signalling the same semaphore while the presentation engine still
+    // owns it (which happens when imageCount > VULKAN_FRAMES_IN_FLIGHT).
+    VkSemaphoreCreateInfo si{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    mRenderFinishedSems.resize(imgCount);
+    for (uint32_t i = 0; i < imgCount; i++) {
+        VK_CHECK(vkCreateSemaphore(mDevice, &si, nullptr, &mRenderFinishedSems[i]));
+    }
 }
 
 void GfxRenderingAPIVulkan::DestroySwapchain() {
+    for (auto sem : mRenderFinishedSems) vkDestroySemaphore(mDevice, sem, nullptr);
+    mRenderFinishedSems.clear();
     for (auto iv : mSwapchainImageViews) vkDestroyImageView(mDevice, iv, nullptr);
     mSwapchainImageViews.clear();
     mSwapchainImages.clear();
@@ -855,8 +865,11 @@ void GfxRenderingAPIVulkan::EndFrame() {
 
     auto& fr = mFrames[mCurrentFrame];
 
-    // End any active rendering pass
-    // (EndDraw called separately from StartDrawToFramebuffer)
+    // End any active render pass before barriers/submission
+    if (mRenderingActive) {
+        vkCmdEndRendering(fr.cmdBuf);
+        mRenderingActive = false;
+    }
 
     // Transition swapchain image to present
     TransitionImageLayout(fr.cmdBuf, mSwapchainImages[mSwapchainImageIndex],
@@ -873,13 +886,14 @@ void GfxRenderingAPIVulkan::EndFrame() {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &fr.cmdBuf;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &fr.renderFinishedSem;
+    VkSemaphore renderFinishedSem = mRenderFinishedSems[mSwapchainImageIndex];
+    si.pSignalSemaphores = &renderFinishedSem;
     VK_CHECK(vkQueueSubmit(mGraphicsQueue, 1, &si, fr.inFlightFence));
 
     VkPresentInfoKHR pi{};
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &fr.renderFinishedSem;
+    pi.pWaitSemaphores = &renderFinishedSem;
     pi.swapchainCount = 1;
     pi.pSwapchains = &mSwapchain;
     pi.pImageIndices = &mSwapchainImageIndex;
@@ -971,9 +985,11 @@ void GfxRenderingAPIVulkan::RecreateFramebufferImages(VulkanFramebuffer& fb) {
     if (fb.msaaLevel > 1) {
         TransitionImageLayout(cmd, fb.colorResolvImage, VK_IMAGE_LAYOUT_UNDEFINED,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        fb.colorResolvLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
     TransitionImageLayout(cmd, fb.colorImage, VK_IMAGE_LAYOUT_UNDEFINED,
                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    fb.colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     if (fb.hasDepth)
         TransitionImageLayout(cmd, fb.depthImage, VK_IMAGE_LAYOUT_UNDEFINED,
                               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -1019,6 +1035,12 @@ void GfxRenderingAPIVulkan::StartDrawToFramebuffer(int fbId, float noiseScale) {
     auto& fr = mFrames[mCurrentFrame];
     VkCommandBuffer cmd = fr.cmdBuf;
 
+    // End any currently active render pass before beginning a new one
+    if (mRenderingActive) {
+        vkCmdEndRendering(cmd);
+        mRenderingActive = false;
+    }
+
     VkRenderingAttachmentInfo colorAttach{};
     colorAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     colorAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -1042,6 +1064,16 @@ void GfxRenderingAPIVulkan::StartDrawToFramebuffer(int fbId, float noiseScale) {
         vkCmdBeginRendering(cmd, &ri);
     } else {
         auto& fb = mFrameBuffers[fbId];
+
+        // If the image was previously transitioned to SHADER_READ_ONLY for sampling,
+        // transition it back to COLOR_ATTACHMENT before rendering into it.
+        if (fb.colorLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+            fb.colorLayout != VK_IMAGE_LAYOUT_UNDEFINED) {
+            TransitionImageLayout(cmd, fb.colorImage, fb.colorLayout,
+                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            fb.colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+
         colorAttach.imageView = fb.colorView;
         colorAttach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         ri.renderArea = { {0,0}, {fb.width, fb.height} };
@@ -1053,6 +1085,7 @@ void GfxRenderingAPIVulkan::StartDrawToFramebuffer(int fbId, float noiseScale) {
         }
         vkCmdBeginRendering(cmd, &ri);
     }
+    mRenderingActive = true;
 }
 
 void GfxRenderingAPIVulkan::ClearFramebuffer(bool color, bool depth) {
@@ -1090,7 +1123,10 @@ void GfxRenderingAPIVulkan::CopyFramebuffer(int fbDstId, int fbSrcId, int sx0, i
     // End any active rendering before blit
     auto& fr = mFrames[mCurrentFrame];
     VkCommandBuffer cmd = fr.cmdBuf;
-    vkCmdEndRendering(cmd);
+    if (mRenderingActive) {
+        vkCmdEndRendering(cmd);
+        mRenderingActive = false;
+    }
 
     if (fbSrcId >= (int)mFrameBuffers.size() || fbDstId >= (int)mFrameBuffers.size()) return;
 
@@ -1099,10 +1135,12 @@ void GfxRenderingAPIVulkan::CopyFramebuffer(int fbDstId, int fbSrcId, int sx0, i
 
     VkImage srcImg = fbSrcId == 0 ? mSwapchainImages[mSwapchainImageIndex] : src.colorImage;
     VkImage dstImg = fbDstId == 0 ? mSwapchainImages[mSwapchainImageIndex] : dst.colorImage;
+    VkImageLayout srcOldLayout = fbSrcId == 0 ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : src.colorLayout;
+    VkImageLayout dstOldLayout = fbDstId == 0 ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : dst.colorLayout;
 
     // Transition for blit
-    TransitionImageLayout(cmd, srcImg, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    TransitionImageLayout(cmd, dstImg, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    TransitionImageLayout(cmd, srcImg, srcOldLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    TransitionImageLayout(cmd, dstImg, dstOldLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     VkImageBlit blit{};
     blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -1114,9 +1152,9 @@ void GfxRenderingAPIVulkan::CopyFramebuffer(int fbDstId, int fbSrcId, int sx0, i
     vkCmdBlitImage(cmd, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dstImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
 
-    // Transition back
-    TransitionImageLayout(cmd, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    TransitionImageLayout(cmd, dstImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // Transition back to original layouts
+    TransitionImageLayout(cmd, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, srcOldLayout);
+    TransitionImageLayout(cmd, dstImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, dstOldLayout);
 }
 
 void GfxRenderingAPIVulkan::ReadFramebufferToCPU(int fbId, uint32_t width, uint32_t height, uint16_t* rgba16Buf) {
@@ -1134,8 +1172,16 @@ void GfxRenderingAPIVulkan::ReadFramebufferToCPU(int fbId, uint32_t width, uint3
     VK_CHECK(vmaCreateBuffer(mAllocator, &bci, &vaci, &stageBuf, &stageAlloc, &stageInfo));
 
     VkCommandBuffer cmd = BeginOneTimeSubmit();
-    VkImage srcImg = fbId == 0 ? mSwapchainImages[mSwapchainImageIndex] : mFrameBuffers[fbId].colorImage;
-    TransitionImageLayout(cmd, srcImg, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkImage srcImg;
+    VkImageLayout srcLayout;
+    if (fbId == 0) {
+        srcImg = mSwapchainImages[mSwapchainImageIndex];
+        srcLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    } else {
+        srcImg = mFrameBuffers[fbId].colorImage;
+        srcLayout = mFrameBuffers[fbId].colorLayout;
+    }
+    TransitionImageLayout(cmd, srcImg, srcLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
     VkBufferImageCopy region{};
     region.bufferOffset = 0;
@@ -1143,7 +1189,7 @@ void GfxRenderingAPIVulkan::ReadFramebufferToCPU(int fbId, uint32_t width, uint3
     region.imageOffset = { 0, 0, 0 };
     region.imageExtent = { width, height, 1 };
     vkCmdCopyImageToBuffer(cmd, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stageBuf, 1, &region);
-    TransitionImageLayout(cmd, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    TransitionImageLayout(cmd, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, srcLayout);
     EndOneTimeSubmit(cmd);
 
     // Convert RGBA8 → RGBA16
@@ -1160,14 +1206,17 @@ void GfxRenderingAPIVulkan::ResolveMSAAColorBuffer(int fbIdTarget, int fbIdSrc) 
 
     auto& fr = mFrames[mCurrentFrame];
     VkCommandBuffer cmd = fr.cmdBuf;
-    vkCmdEndRendering(cmd);
+    if (mRenderingActive) {
+        vkCmdEndRendering(cmd);
+        mRenderingActive = false;
+    }
 
     auto& src = mFrameBuffers[fbIdSrc];
     auto& dst = mFrameBuffers[fbIdTarget];
     if (src.msaaLevel <= 1 || src.colorResolvImage == VK_NULL_HANDLE) return;
 
-    TransitionImageLayout(cmd, src.colorImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    TransitionImageLayout(cmd, dst.colorImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    TransitionImageLayout(cmd, src.colorImage, src.colorLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    TransitionImageLayout(cmd, dst.colorImage, dst.colorLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     VkImageResolve resolve{};
     resolve.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -1176,8 +1225,10 @@ void GfxRenderingAPIVulkan::ResolveMSAAColorBuffer(int fbIdTarget, int fbIdSrc) 
     vkCmdResolveImage(cmd, src.colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                       dst.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &resolve);
 
-    TransitionImageLayout(cmd, src.colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    TransitionImageLayout(cmd, dst.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    src.colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    dst.colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    TransitionImageLayout(cmd, src.colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src.colorLayout);
+    TransitionImageLayout(cmd, dst.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, dst.colorLayout);
 }
 
 // ---- Texture management -----------------------------------------------------
@@ -1216,6 +1267,7 @@ void GfxRenderingAPIVulkan::UploadTexture(const uint8_t* rgba32Buf, uint32_t wid
         vmaDestroyImage(mAllocator, tex.image, tex.allocation);
         tex.image = VK_NULL_HANDLE;
         tex.view = VK_NULL_HANDLE;
+        tex.cachedImguiId = nullptr; // image changed, invalidate ImGui cache
     }
 
     tex.width = width;
@@ -1322,25 +1374,49 @@ VkSampler GfxRenderingAPIVulkan::GetOrCreateSampler(const VulkanTexture& tex) {
 }
 
 void GfxRenderingAPIVulkan::SelectTextureFb(int fbId) {
-    // Use the off-screen FB's color image as texture slot 0
-    // We keep a "virtual" texture entry backed by the FB image
-    uint32_t texId;
-    if (fbId < (int)mFrameBuffers.size()) {
-        // Allocate a pseudo-texture slot for the FB if needed
-        // FB textures share slots starting past the normal texture range
-        // Simple approach: use fbId offset by a large number
-        texId = (uint32_t)(fbId + 0x4000);
-        if (texId >= mTextures.size()) mTextures.resize(texId + 1);
-        auto& tex = mTextures[texId];
-        auto& fb = mFrameBuffers[fbId];
-        tex.view = fbId == 0 ? mSwapchainImageViews[mSwapchainImageIndex]
-                             : (fb.msaaLevel > 1 && fb.colorResolvView ? fb.colorResolvView : fb.colorView);
-        tex.width = fbId == 0 ? mSwapchainExtent.width : fb.width;
-        tex.height = fbId == 0 ? mSwapchainExtent.height : fb.height;
-        if (!tex.sampler) tex.sampler = GetOrCreateSampler(tex);
-    } else {
-        return;
+    // Use the off-screen FB's color image as texture slot 0.
+    // Must end any active render pass and transition the image to SHADER_READ_ONLY before sampling.
+    if (fbId <= 0 || fbId >= (int)mFrameBuffers.size()) return;
+
+    auto& fr = mFrames[mCurrentFrame];
+    VkCommandBuffer cmd = fr.cmdBuf;
+
+    // End render pass so we can do a pipeline barrier
+    if (mRenderingActive) {
+        vkCmdEndRendering(cmd);
+        mRenderingActive = false;
     }
+
+    auto& fb = mFrameBuffers[fbId];
+
+    // Determine which image/view to sample from
+    VkImage imgToSample;
+    VkImageView viewToSample;
+    VkImageLayout* layoutPtr;
+    if (fb.msaaLevel > 1 && fb.colorResolvImage) {
+        imgToSample = fb.colorResolvImage;
+        viewToSample = fb.colorResolvView;
+        layoutPtr = &fb.colorResolvLayout;
+    } else {
+        imgToSample = fb.colorImage;
+        viewToSample = fb.colorView;
+        layoutPtr = &fb.colorLayout;
+    }
+
+    // Transition to SHADER_READ_ONLY if not already there
+    if (*layoutPtr != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && *layoutPtr != VK_IMAGE_LAYOUT_UNDEFINED) {
+        TransitionImageLayout(cmd, imgToSample, *layoutPtr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        *layoutPtr = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    uint32_t texId = (uint32_t)(fbId + 0x4000);
+    if (texId >= mTextures.size()) mTextures.resize(texId + 1);
+    auto& tex = mTextures[texId];
+    tex.view = viewToSample;
+    tex.width = fb.width;
+    tex.height = fb.height;
+    if (!tex.sampler) tex.sampler = GetOrCreateSampler(tex);
+
     SelectTexture(0, texId);
 }
 
@@ -1797,25 +1873,50 @@ ImTextureID GfxRenderingAPIVulkan::GetTextureById(int id) {
     if ((uint32_t)id >= mTextures.size()) return nullptr;
     auto& tex = mTextures[id];
     if (!tex.view || !tex.sampler) return nullptr;
-    return ImGui_ImplVulkan_AddTexture(tex.sampler, tex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // Cache the descriptor set allocated by ImGui; avoid re-allocating every frame.
+    if (!tex.cachedImguiId) {
+        tex.cachedImguiId = ImGui_ImplVulkan_AddTexture(tex.sampler, tex.view,
+                                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    return tex.cachedImguiId;
 }
 
 void* GfxRenderingAPIVulkan::GetFramebufferTextureId(int fbId) {
     if (fbId == 0 || fbId >= (int)mFrameBuffers.size()) return nullptr;
     auto& fb = mFrameBuffers[fbId];
+
+    // Ensure we're using the resolved image for MSAA, or the color image otherwise
+    uint32_t pseudoId = (uint32_t)(fbId + 0x4000);
+    if (pseudoId >= mTextures.size()) mTextures.resize(pseudoId + 1);
+    auto& tex = mTextures[pseudoId];
+
     VkImageView view = (fb.msaaLevel > 1 && fb.colorResolvView) ? fb.colorResolvView : fb.colorView;
     if (!view) return nullptr;
-    VkSampler sampler = VK_NULL_HANDLE;
-    // Create a default sampler for fb reads if needed
-    if (mTextures.size() > (uint32_t)fbId + 0x4000) {
-        sampler = mTextures[fbId + 0x4000].sampler;
+    if (!tex.sampler) tex.sampler = GetOrCreateSampler(tex);
+
+    // The view may have changed (e.g. after framebuffer resize); invalidate cache if so.
+    if (tex.view != view) {
+        tex.view = view;
+        tex.cachedImguiId = nullptr;
     }
-    if (!sampler) {
-        VulkanTexture tmp{};
-        sampler = GetOrCreateSampler(tmp);
-        // leak is acceptable as this is a rare path
+    if (!tex.cachedImguiId) {
+        // The FB image must be in SHADER_READ_ONLY_OPTIMAL when ImGui samples it.
+        // End any active render pass and transition the image.
+        auto& fr = mFrames[mCurrentFrame];
+        if (mRenderingActive) {
+            vkCmdEndRendering(fr.cmdBuf);
+            mRenderingActive = false;
+        }
+        VkImage imgToSample = (fb.msaaLevel > 1 && fb.colorResolvImage) ? fb.colorResolvImage : fb.colorImage;
+        VkImageLayout* layoutPtr = (fb.msaaLevel > 1 && fb.colorResolvImage) ? &fb.colorResolvLayout : &fb.colorLayout;
+        if (*layoutPtr != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && *layoutPtr != VK_IMAGE_LAYOUT_UNDEFINED) {
+            TransitionImageLayout(fr.cmdBuf, imgToSample, *layoutPtr, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            *layoutPtr = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        tex.cachedImguiId = ImGui_ImplVulkan_AddTexture(tex.sampler, view,
+                                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
-    return ImGui_ImplVulkan_AddTexture(sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    return tex.cachedImguiId;
 }
 
 // ---- ImGui integration ------------------------------------------------------

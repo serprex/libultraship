@@ -46,6 +46,8 @@ struct VulkanTexture {
     VkSamplerAddressMode wrapS = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     VkSamplerAddressMode wrapT = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     bool linearFiltering = false;
+    // Cached ImTextureID from ImGui_ImplVulkan_AddTexture (allocated once, reused each frame)
+    ImTextureID cachedImguiId = nullptr;
 };
 
 struct VulkanFramebuffer {
@@ -68,13 +70,18 @@ struct VulkanFramebuffer {
     VkImage depthImage = VK_NULL_HANDLE;
     VmaAllocation depthAlloc = VK_NULL_HANDLE;
     VkImageView depthView = VK_NULL_HANDLE;
+
+    // Track current image layout for color and resolve images
+    VkImageLayout colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout colorResolvLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 };
 
 struct VulkanFrameData {
     VkCommandPool cmdPool = VK_NULL_HANDLE;
     VkCommandBuffer cmdBuf = VK_NULL_HANDLE;
+    // Signaled by vkAcquireNextImageKHR; waited on in vkQueueSubmit.
+    // One per frame-in-flight slot is correct for the acquire side.
     VkSemaphore imageAvailableSem = VK_NULL_HANDLE;
-    VkSemaphore renderFinishedSem = VK_NULL_HANDLE;
     VkFence inFlightFence = VK_NULL_HANDLE;
 };
 
@@ -160,6 +167,10 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI {
     std::vector<VkImageView> mSwapchainImageViews;
     uint32_t mSwapchainImageIndex = 0;
     bool mVsyncEnabled = true;
+    // One renderFinishedSem per swapchain image (not per frame-in-flight).
+    // Presentation holds the semaphore until the image is displayed; using one per
+    // image prevents reuse before the previous presentation of that image completes.
+    std::vector<VkSemaphore> mRenderFinishedSems;
 
     // Frames in flight
     VulkanFrameData mFrames[VULKAN_FRAMES_IN_FLIGHT];
@@ -196,6 +207,8 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI {
     bool mDepthTestEnabled = false;
     bool mDepthWriteEnabled = false;
     bool mZmodeDecal = false;
+    bool mRenderingActive = false;
+    bool mSrgbMode = false;
     float mCurrentNoiseScale = 1.0f;
     uint32_t mFrameCount = 0;
     FilteringMode mFilterMode = FILTER_THREE_POINT;
